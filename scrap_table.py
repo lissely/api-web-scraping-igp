@@ -1,60 +1,52 @@
 import requests
-from bs4 import BeautifulSoup
 import boto3
 import uuid
 
 def lambda_handler(event, context):
-    url = "https://ultimosismo.igp.gob.pe/ultimo-sismo/sismos-reportados"
+    url = "https://ultimosismo.igp.gob.pe/api/ultimo-sismo/ajaxb/2025"
 
     response = requests.get(url)
     if response.status_code != 200:
         return {
             'statusCode': response.status_code,
-            'body': 'Error al acceder a la página web'
+            'body': 'Error al acceder a la API de sismos'
         }
 
-    soup = BeautifulSoup(response.content, "html.parser")
-    tabla_html = soup.find("table")
-    if not tabla_html:
+    try:
+        datos = response.json()
+        ultimos_10 = datos[-10:]
+    except Exception as e:
         return {
-            'statusCode': 404,
-            'body': 'No se encontró la tabla en la página web'
+            'statusCode': 500,
+            'body': f'Error al procesar el JSON: {str(e)}'
         }
 
-    rows_html = tabla_html.find("tbody").find_all("tr")
-    if not rows_html:
-        return {
-            'statusCode': 204,
-            'body': 'No se encontraron filas de datos'
-        }
-
-    # Conectar a DynamoDB
     dynamodb = boto3.resource('dynamodb')
-    tabla_dynamo = dynamodb.Table('TablaSismosIGP')
+    table = dynamodb.Table('TablaSismosIGP')
 
-    # Limpiar tabla antes de insertar nuevos datos
-    scan = tabla_dynamo.scan()
-    with tabla_dynamo.batch_writer() as batch:
-        for item in scan.get('Items', []):
-            batch.delete_item(Key={'id': item['id']})
-
-    # Procesar los primeros 10 sismos
-    sismos = []
-    for row in rows_html[:10]:
-        cols = row.find_all("td")
-        if len(cols) < 4:
-            continue
-        sismo = {
-            "id": str(uuid.uuid4()),
-            "reporte": cols[0].get_text(strip=True),
-            "referencia": cols[1].get_text(strip=True),
-            "fecha_hora": cols[2].get_text(strip=True),
-            "magnitud": cols[3].get_text(strip=True),
+    try:
+        scan = table.scan()
+        with table.batch_writer() as batch:
+            for item in scan.get('Items', []):
+                batch.delete_item(Key={'id': item['id']})
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': f'Error al limpiar la tabla: {str(e)}'
         }
-        tabla_dynamo.put_item(Item=sismo)
-        sismos.append(sismo)
+
+    try:
+        for i, row in enumerate(ultimos_10, start=1):
+            row['#'] = i
+            row['id'] = str(uuid.uuid4())
+            table.put_item(Item=row)
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': f'Error al insertar los datos: {str(e)}'
+        }
 
     return {
         'statusCode': 200,
-        'body': sismos
+        'body': ultimos_10
     }
